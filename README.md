@@ -116,6 +116,13 @@ Ollama) running on your host machine — `docker-compose.yml` already maps it.
    ```bash
    fly secrets set ANTHROPIC_API_KEY=sk-ant-...
    ```
+   And, since this app will be reachable on the public internet, set a
+   password (see [Restricting access](#restricting-access-password-gate)
+   below) — do this *before* your first deploy if you can, so the app is
+   never open without one:
+   ```bash
+   fly secrets set APP_PASSWORD=choose-something-not-guessable
+   ```
 4. Deploy:
    ```bash
    fly deploy
@@ -132,6 +139,31 @@ snapshot) to a server. Fly's free/hobby tier is a single small VM you
 control, not a shared platform reading your data, but if that tradeoff
 doesn't sit right for data this sensitive, the local/Docker path keeps
 everything on your own machine.
+
+## Restricting access (password gate)
+
+Anyone with your Fly.io URL can otherwise open the app and use it — nothing
+of *yours* is exposed (there's no persistent storage; each browser session's
+uploads live only in that session's memory), but it's still your app running
+on your bill, doing its own thing for whoever finds the link. A single shared
+password behind `APP_PASSWORD` closes that:
+
+```bash
+fly secrets set APP_PASSWORD=choose-something-not-guessable
+```
+
+Setting the secret alone is enough — `src/auth.py` picks it up automatically
+and puts a password screen in front of everything else, no redeploy required
+(Fly restarts the machine with the new secret in place). Leave `APP_PASSWORD`
+unset — the default, and how local dev runs — and the app has no gate at all.
+
+This is a shared secret, not real auth: one password for anyone you give it
+to, no per-user accounts, no rate limiting on guesses, no audit log. Good
+enough to keep a personal deployment off the open internet's radar; not a
+substitute for proper auth if that ever matters more (e.g. multiple people
+each needing their own login).
+
+To run the same gate locally: `APP_PASSWORD=whatever streamlit run app.py`.
 
 ## Connecting an LLM for the "Ask AI" tab
 
@@ -341,6 +373,7 @@ inside the app afterward.
 ```
 app.py                        Streamlit UI — the only file that talks to Streamlit
 src/
+  auth.py                       optional shared-password gate (APP_PASSWORD)
   models.py                    Transaction / Statement dataclasses
   pdf_utils.py                  decrypt + text/table extraction (pypdf + pdfplumber)
   bank_detect.py                 bank identification from statement letterhead

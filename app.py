@@ -23,6 +23,7 @@ from src.analysis import (
     headline_stats,
     monthly_summary,
 )
+from src.auth import require_password
 from src.bank_detect import SUPPORTED_BANKS
 from src.budget_compare import build_budget_vs_actual
 from src.categorize import categorize_dataframe, load_default_rules, parse_rules, validate_rules_yaml
@@ -56,6 +57,7 @@ from src.ui.charts import (
 )
 
 st.set_page_config(page_title="Financial Statement Analyser", page_icon="🏦", layout="wide")
+require_password()  # no-op unless APP_PASSWORD is set — see src/auth.py
 
 # ----------------------------------------------------------------------------
 # Session state
