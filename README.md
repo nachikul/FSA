@@ -17,11 +17,12 @@ explicitly ask the "Ask AI" tab, and only to whichever model you configure.
 |---|---|---|
 | **Bank statements** | PDF upload, password if any | As current as your last download |
 | **Personal finance sheet** | `.xlsx` upload | As current as your last export from Drive |
-| **INDmoney portfolio** | JSON upload | A point-in-time snapshot — see [below](#3--indmoney-portfolio-snapshot) for the refresh workflow |
+| **INDmoney portfolio** | JSON upload, or a local-only live connect | See [below](#3--indmoney-portfolio) for both options |
 
-None of these are live API integrations the app polls on its own — each is a
-file you hand it, the same way you'd hand it a bank statement. That's a
-deliberate choice, not a shortcut: see why under each source below.
+Bank statements and the personal sheet are always file uploads — nothing the
+app polls on its own. INDmoney additionally supports connecting live (see
+below), but that connection is still local-only and session-only by design;
+see why under each source below.
 
 ## Features
 
@@ -331,15 +332,55 @@ expects):
 **Two tabs are never opened**, by name pattern (`trading`, `saving[s]_?scheme`
 — case-insensitive): whatever you use those for stays untouched.
 
-## 3 · INDmoney portfolio snapshot
+## 3 · INDmoney portfolio
 
-INDmoney data in this app comes from Claude's INDmoney connector (an MCP
-tool), which is only available *inside a Claude conversation* — a
-standalone, deployed Streamlit app has no way to call it. So this is a
-periodic manual export rather than a live "connect your account" integration:
-you ask Claude to pull your portfolio into a JSON file using the connector,
-then upload that file here (sidebar, section 3) the same way you'd upload a
-bank statement. Refresh it whenever you want current numbers.
+There are two ways to get INDmoney data into this app. Both produce the same
+`IndmoneyPortfolio` object internally (`src/sources/indmoney.py`), so
+everything downstream — Net Worth, Investments & SIPs, Ask AI — behaves
+identically either way.
+
+### Option A — connect live (local use only)
+
+INDmoney runs its own public MCP server (`mcp.indmoney.com`) with standard
+OAuth 2.1 + PKCE and self-service dynamic client registration — it's a
+separate, INDmoney-operated endpoint, not something routed through Claude.
+`src/indmoney_oauth.py` and `src/indmoney_mcp_client.py` implement a minimal
+client against it directly, so the app can pull a fresh snapshot itself
+without Claude in the loop at all.
+
+Click **Connect INDmoney** in the sidebar (section 3 → "Connect live (local
+use only)"). This:
+
+1. Registers this app as an OAuth client with INDmoney (happens silently,
+   once per session — no manual approval step on INDmoney's side).
+2. Gives you a link to INDmoney's own login page. You authenticate there
+   directly (mobile + OTP + MPIN) — this app never sees your INDmoney
+   credentials, only the OAuth redirect back with an authorization code.
+3. Exchanges that code for an access token and immediately fetches your
+   net worth, holdings, and SIPs over the MCP protocol.
+
+**Why this is local-only, session-only, by design:**
+
+- The OAuth redirect URI is fixed to `http://localhost:8501/`. If you deploy
+  this app elsewhere (Fly.io, etc.), INDmoney's login can't redirect back to
+  it — Option A only works when you're running the app on your own machine
+  and browsing to `localhost`. Use Option B (snapshot upload) on a hosted
+  deployment.
+- The access/refresh tokens live only in Streamlit's `session_state` — never
+  written to disk, never persisted across a restart. Closing the tab or
+  restarting the app means reconnecting.
+- There's a **Disconnect** button (revokes the token with INDmoney and clears
+  it from session state) and a **Refresh now** button (re-fetches without a
+  full re-login, using the stored refresh token) once connected.
+
+### Option B — upload a snapshot (works anywhere, including hosted deployments)
+
+This is the original approach: ask Claude — in a separate conversation, using
+Claude's own INDmoney connector — to export your portfolio to a JSON file,
+then upload that file here (sidebar, section 3, below the "— or —" divider)
+the same way you'd upload a bank statement. Refresh it whenever you want
+current numbers. This is the only option available on a hosted deployment,
+since Option A's redirect can't reach a non-localhost app.
 
 **To generate a snapshot**, in a Claude conversation with the INDmoney
 connector available, ask something like:
@@ -361,7 +402,7 @@ connector available, ask something like:
 Upload the resulting file in the sidebar. `src/sources/indmoney.py` has the
 full schema this parser expects if you want to build the export differently.
 
-**Privacy note specific to this source:** because the export happens inside
+**Privacy note specific to Option B:** because the export happens inside
 a Claude conversation, that data already passed through Claude once before
 it ever reaches this app — the same privacy consideration as the Ask AI tab
 (see [Connecting an LLM](#connecting-an-llm-for-the-ask-ai-tab)) applies to
@@ -388,7 +429,9 @@ src/
   budget_compare.py              maps sheet budget categories onto spend categories
   sources/
     personal_sheet.py             personal finance-tracking .xlsx parser
-    indmoney.py                    INDmoney portfolio snapshot (JSON) parser
+    indmoney.py                    INDmoney portfolio parser (shared by upload + live fetch)
+  indmoney_oauth.py                OAuth 2.1 + PKCE client for INDmoney's MCP server (live connect)
+  indmoney_mcp_client.py            minimal MCP Streamable HTTP client (live connect)
   llm/
     context.py                    bundles all loaded data sources for the tools
     base.py                       shared LLMClient interface + system prompt
@@ -439,9 +482,15 @@ src/
   clears them (nothing is persisted unless you add your own storage).
 - If you use Claude API in the Ask AI tab, tool-call results are sent to
   Anthropic per query — see [Option A](#option-a--claude-api) above.
-- The INDmoney snapshot's *generation* (not its use inside this app) happens
-  in a separate Claude conversation with the INDmoney connector — see the
-  privacy note under [INDmoney portfolio snapshot](#3--indmoney-portfolio-snapshot).
+- If you use Option B (snapshot upload), the snapshot's *generation* (not its
+  use inside this app) happens in a separate Claude conversation with the
+  INDmoney connector — see the privacy note under
+  [INDmoney portfolio](#3--indmoney-portfolio). Option A (live connect) never
+  routes through Claude at all — your INDmoney login and portfolio data go
+  directly between this app and INDmoney's own servers.
+- If you use Option A, the access token lives only in `session_state` for
+  that browser session and only works when the app is reachable at
+  `localhost` — see [Option A](#option-a--connect-live-local-use-only) above.
 - Don't commit a `.env` file, an exported sheet/snapshot, or API keys into
   files you commit — `.gitignore` already excludes `.env`,
   `.streamlit/secrets.toml`, and `data/` (a reasonable place to keep your own

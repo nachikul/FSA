@@ -12,6 +12,7 @@ when the source it needs isn't there yet, rather than hiding or erroring.
 from __future__ import annotations
 
 import os
+import time
 
 import pandas as pd
 import streamlit as st
@@ -38,7 +39,9 @@ from src.pdf_utils import (
     full_text,
     open_pdf,
 )
-from src.sources.indmoney import load_indmoney_snapshot
+from src.indmoney_mcp_client import MCPError, fetch_live_snapshot
+from src.indmoney_oauth import OAuthError, build_authorize_url, exchange_code, register_client, revoke
+from src.sources.indmoney import load_indmoney_snapshot, parse_indmoney_data
 from src.sources.personal_sheet import (
     PersonalFinanceData,
     investment_items_to_frame,
@@ -72,9 +75,41 @@ defaults = {
     "sheet_error": None,
     "portfolio": None,
     "portfolio_error": None,
+    "indmoney_client_creds": None,
+    "indmoney_pending_auth": None,
+    "indmoney_authorize_url": None,
+    "indmoney_tokens": None,
+    "indmoney_live_error": None,
 }
 for key, val in defaults.items():
     st.session_state.setdefault(key, val)
+
+INDMONEY_REDIRECT_URI = os.environ.get("APP_BASE_URL", "http://localhost:8501") + "/"
+
+# Handle the OAuth redirect landing back on this same app (query params
+# carry the authorization code) — must run before the sidebar renders, so
+# section 3 below reflects the just-completed connection immediately.
+_qp = st.query_params
+if "code" in _qp and st.session_state.indmoney_pending_auth is not None:
+    try:
+        tokens = exchange_code(
+            st.session_state.indmoney_client_creds,
+            st.session_state.indmoney_pending_auth,
+            _qp.get("code"),
+            _qp.get("state", ""),
+        )
+        st.session_state.indmoney_tokens = tokens
+        st.session_state.indmoney_pending_auth = None
+        st.query_params.clear()
+        with st.spinner("Connected — fetching your INDmoney portfolio…"):
+            live_data = fetch_live_snapshot(tokens.access_token)
+            st.session_state.portfolio = parse_indmoney_data(live_data)
+        st.session_state.portfolio_error = None
+        st.session_state.indmoney_live_error = None
+    except (OAuthError, MCPError) as exc:
+        st.session_state.indmoney_live_error = str(exc)
+        st.session_state.indmoney_pending_auth = None
+        st.query_params.clear()
 
 # ----------------------------------------------------------------------------
 # Sidebar — 1. Bank statements
@@ -165,8 +200,61 @@ elif st.session_state.sheet_data is not None:
 # Sidebar — 3. INDmoney portfolio (optional)
 # ----------------------------------------------------------------------------
 st.sidebar.header("3 · INDmoney portfolio")
+
+tokens = st.session_state.indmoney_tokens
+if tokens is not None:
+    mins_left = max(0, int((tokens.expires_at - time.time()) / 60))
+    st.sidebar.success(f"✅ Connected live — session token valid ~{mins_left} min")
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("Refresh now"):
+        try:
+            with st.spinner("Fetching latest portfolio…"):
+                live_data = fetch_live_snapshot(tokens.access_token)
+                st.session_state.portfolio = parse_indmoney_data(live_data)
+            st.session_state.portfolio_error = None
+        except MCPError as exc:
+            st.session_state.portfolio_error = f"Live refresh failed: {exc}"
+        st.rerun()
+    if c2.button("Disconnect"):
+        if st.session_state.indmoney_client_creds:
+            revoke(st.session_state.indmoney_client_creds, tokens)
+        st.session_state.indmoney_tokens = None
+        st.session_state.indmoney_client_creds = None
+        st.rerun()
+else:
+    pending = st.session_state.indmoney_pending_auth
+    with st.sidebar.expander("Connect live (local use only)", expanded=pending is not None):
+        st.caption(
+            "Logs you into INDmoney directly (mobile + OTP + MPIN, on their own site — never "
+            "seen by this app) and pulls your portfolio over their official MCP server. Local "
+            "use only: the login redirect points back to localhost. The session token is kept "
+            "in memory for this browser session only — nothing is written to disk, and it's "
+            "gone when you close the tab. See README.md > 'INDmoney portfolio — live connect'."
+        )
+        if pending is None:
+            if st.button("Connect INDmoney"):
+                try:
+                    creds = register_client(INDMONEY_REDIRECT_URI)
+                    url, new_pending = build_authorize_url(creds)
+                    st.session_state.indmoney_client_creds = creds
+                    st.session_state.indmoney_pending_auth = new_pending
+                    st.session_state.indmoney_authorize_url = url
+                    st.rerun()
+                except OAuthError as exc:
+                    st.error(f"Couldn't start the connection: {exc}")
+        else:
+            st.link_button("Continue to INDmoney to log in →", st.session_state.indmoney_authorize_url, type="primary")
+            if st.button("Cancel"):
+                st.session_state.indmoney_pending_auth = None
+                st.session_state.indmoney_authorize_url = None
+                st.rerun()
+
+if st.session_state.indmoney_live_error:
+    st.sidebar.error(f"Live connection failed: {st.session_state.indmoney_live_error}")
+
+st.sidebar.caption("— or —")
 indmoney_file = st.sidebar.file_uploader(
-    "Portfolio snapshot JSON (optional)",
+    "Upload a portfolio snapshot JSON instead",
     type=["json"],
     help="See README.md > 'INDmoney portfolio' for the export prompt that generates this file.",
 )
@@ -180,7 +268,7 @@ if indmoney_file is not None:
 if st.session_state.portfolio_error:
     st.sidebar.error(st.session_state.portfolio_error)
 elif st.session_state.portfolio is not None:
-    st.sidebar.caption(f"Snapshot from {st.session_state.portfolio.exported_at or 'unknown time'}")
+    st.sidebar.caption(f"Portfolio data from {st.session_state.portfolio.exported_at or 'unknown time'}")
 
 # ----------------------------------------------------------------------------
 # Sidebar — 4. Categorization rules

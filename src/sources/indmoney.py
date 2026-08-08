@@ -80,7 +80,13 @@ def _flatten_mf_sips(mf_sips_raw: list[dict]) -> pd.DataFrame:
 
 
 def load_indmoney_snapshot(file_bytes: bytes) -> IndmoneyPortfolio:
-    data = json.loads(file_bytes)
+    return parse_indmoney_data(json.loads(file_bytes))
+
+
+def parse_indmoney_data(data: dict) -> IndmoneyPortfolio:
+    """Shared by both the uploaded-JSON-file path and the live MCP-fetch
+    path (src/indmoney_mcp_client.py) — both produce this same envelope
+    shape, so everything downstream of parsing is identical either way."""
     snap = data.get("networth_snapshot", {})
 
     p = IndmoneyPortfolio(
