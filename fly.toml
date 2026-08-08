@@ -3,7 +3,7 @@
 # updates. See README.md > Deploying to Fly.io for the full walkthrough.
 
 app = "statement-analyzer"           # change to a globally-unique name
-primary_region = "bom"               # Mumbai — pick the region closest to you
+primary_region = "sin"               # Singapore — Mumbai (bom) had no VM capacity at deploy time
 
 [build]
 
