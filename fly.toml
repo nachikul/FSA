@@ -1,0 +1,33 @@
+# Fly.io app configuration. Run `fly launch` once to create the app (it will
+# detect this file and offer to reuse it), then `fly deploy` for subsequent
+# updates. See README.md > Deploying to Fly.io for the full walkthrough.
+
+app = "statement-analyzer"           # change to a globally-unique name
+primary_region = "bom"               # Mumbai — pick the region closest to you
+
+[build]
+
+[env]
+  STREAMLIT_SERVER_HEADLESS = "true"
+  STREAMLIT_SERVER_ADDRESS = "0.0.0.0"
+  STREAMLIT_SERVER_PORT = "8501"
+  STREAMLIT_BROWSER_GATHER_USAGE_STATS = "false"
+
+[http_service]
+  internal_port = 8501
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/_stcore/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

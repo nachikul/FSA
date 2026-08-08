@@ -1,0 +1,89 @@
+# Default categorization rules.
+#
+# Rules are checked top to bottom — the first one whose keyword appears in a
+# transaction's narration wins, so put more specific rules above more general
+# ones (e.g. "Credit Card Payment" above a generic "Bank Fees" catch-all).
+#
+# Matching is done against the narration with ALL whitespace stripped and
+# upper-cased, so keywords should be written as they'd read with spaces
+# removed — "credit card" and "creditcard" match the same things; write
+# whichever is easiest to read, the app normalizes both.
+#
+# `direction` is optional: "credit" (money in), "debit" (money out), or
+# omitted to match either. Edit this file (or paste a modified copy into the
+# app's "Edit rules" panel) to add your own merchants, family members, or
+# categories — no code changes needed.
+
+categories:
+  - name: Salary / Payroll
+    direction: credit
+    keywords: [salary, payroll, "salary credit"]
+
+  - name: RSU / Stock Plan Proceeds
+    direction: credit
+    keywords: ["rsu settlement", "espp", "stock plan", "inw "]
+
+  - name: Interest Income
+    direction: credit
+    keywords: ["interest paid", "interest credit", "int.pd", "int pd", "int on fd"]
+
+  - name: Dividend Income
+    direction: credit
+    keywords: [dividend, "fin.div", "int.div", "fnl div"]
+
+  - name: Income Tax Refund
+    keywords: ["tax refund", "itd tax refund", "income tax refund"]
+
+  - name: Home Loan / Mortgage
+    keywords: ["home loan", "housing loan", "housing development", "hdfcbankltd_yic"]
+
+  - name: Personal / Consumer Loan
+    keywords: [bajaj finance, bajajfinserv, "bajaj finserv", moneytap, earlysalary, kissht, "personal loan", "bflm2p1"]
+
+  - name: Credit Card Payment
+    keywords: [billpay, "credit card", "cred club", "cred.club", "cred fastag", "cred garage", "payment on cred", clearbill, ccbillpay]
+
+  - name: Insurance Premium
+    keywords: [insurance, "icici prudential", "hdfc life", "lic premium", mediclaim, acko, "policy bazaar", pmjjby]
+
+  - name: Investments - Stocks / MF / SIP
+    keywords: [zerodha, groww, upstox, "kite connect", indstocks, "icici direct", "mirae asset", "mutual fund", " sip ", "angel one", coin, "nippon india", "hdfc mf", "axis mf", ipo]
+
+  - name: Investments - Fixed Deposit
+    keywords: ["trf to fd", "fd through mobile", "closure proceeds", "rev sweep", "prin and int"]
+
+  - name: Rent
+    keywords: [" rent ", "house rent", rentpay, nobroker]
+
+  - name: EMI / Loan Repayment
+    keywords: [emi, "loan repay", "loan emi"]
+
+  - name: Utilities & Bills
+    keywords: [electricity, "water bill", "gas bill", broadband, "wifi bill", dth, "mobile bill", postpaid, jiofiber, airtel, vodafone, "society maintenance", "municipal corp", "property tax"]
+
+  - name: Subscriptions
+    keywords: [netflix, hotstar, spotify, "prime video", "google play", "apple.com/bill", jiohotstar, "youtube premium"]
+
+  - name: Shopping / E-commerce
+    keywords: [amazon, flipkart, myntra, ajio, meesho, croma, "vijay sales", nykaa]
+
+  - name: Groceries & Food Delivery
+    keywords: [blinkit, zepto, bigbasket, swiggy, zomato, instamart, dunzo, "big basket"]
+
+  - name: Medical
+    keywords: [hospital, pharmacy, medplus, apollo, practo, diagnostics, medipoint, sonograph, clinic]
+
+  - name: Travel
+    keywords: [irctc, makemytrip, indigo, ixigo, redbus, "vfs global", forex, goibibo, "air india", spicejet, uber, ola]
+
+  - name: Fuel
+    keywords: [petrol, hpcl, iocl, bpcl, "fuel station", "petroleum"]
+
+  - name: Cash Withdrawal
+    keywords: ["cash wdl", "nwd-", atm, "cash withdrawal"]
+
+  - name: Education
+    keywords: ["school fee", tuition, udemy, coursera, "college fee"]
+
+  - name: Bank Fees & Charges
+    keywords: ["sms alert", "dp chg", "dp charges", "amc charges", "annual fee", "gst on", "forex conversion", "scheme conv"]

@@ -1,0 +1,20 @@
+services:
+  statement-analyzer:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      # Optional: pre-fill a default Claude API key so you don't have to paste it
+      # into the UI every run. Leave unset to enter it in the sidebar instead.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Optional: point at a local OpenAI-compatible server (Ollama, LM Studio, vLLM).
+      # Use host.docker.internal so the container can reach a model server running
+      # on your host machine.
+      - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+    volumes:
+      # Bind-mount so uploaded statements / edited category rules survive restarts.
+      # Remove this if you'd rather keep everything ephemeral inside the container.
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
