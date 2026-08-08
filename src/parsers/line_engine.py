@@ -21,8 +21,25 @@ from ..models import Statement, Transaction
 from .profiles import BankProfile
 from .utils import clean_amount, extract_amounts, find_leading_date, try_parse_date
 
-ACCOUNT_NO_RE = re.compile(r"(?:account|a/c)\.?\s*(?:no\.?)?\s*[:\-]?\s*([A-Z0-9]{6,20})", re.IGNORECASE)
+SAVINGS_ACCOUNT_RE = re.compile(r"savings[^0-9]{0,60}?(\d{6,20})", re.IGNORECASE)
+# Digits-only capture is deliberate: an earlier version captured [A-Z0-9]
+# under re.IGNORECASE, which (IGNORECASE affects the whole pattern, not
+# just literal text) matched ordinary words like "Branch" or "Balance" as
+# if they were account numbers whenever they followed "Account " in the
+# statement header. Real account numbers here are always numeric.
+ACCOUNT_NO_RE = re.compile(r"(?:account|a/c)\.?\s*(?:no\.?|number)?\s*[:\-]?\s*(\d{6,20})", re.IGNORECASE)
 HOLDER_RE = re.compile(r"(?:MR\.?|MRS\.?|MS\.?)\s+([A-Z][A-Z .]{3,40})")
+
+
+def _extract_account_number(text: str) -> Optional[str]:
+    # Prefer a number near the word "Savings" — statements with multiple
+    # linked accounts (PPF, FDs, ...) list those first, and a plain
+    # "Account No" search would otherwise grab the wrong one.
+    m = SAVINGS_ACCOUNT_RE.search(text)
+    if m:
+        return m.group(1)
+    m = ACCOUNT_NO_RE.search(text)
+    return m.group(1) if m else None
 
 
 def _strip_boilerplate(lines: list[str], profile: BankProfile, num_pages: int = 1) -> list[str]:
@@ -96,9 +113,7 @@ def parse_lines(
 
     raw_lines = full_text.split("\n")
 
-    m = ACCOUNT_NO_RE.search(full_text)
-    if m:
-        stmt.account_number = m.group(1)
+    stmt.account_number = _extract_account_number(full_text)
     m = HOLDER_RE.search(full_text)
     if m:
         stmt.account_holder = m.group(1).strip().title()
@@ -154,6 +169,30 @@ def parse_lines(
                 narration_parts.append(text)
 
         blocks.append({"date": d, "amounts": amounts, "narration": " ".join(narration_parts)})
+
+    # Multi-ledger statements (e.g. a linked PPF or FD sub-account ledger
+    # printed in the same PDF as the main savings account) repeat a fresh
+    # "B/F" opening-balance line per ledger. Split on those and keep only
+    # the largest segment — the main account's transaction history — so a
+    # small linked ledger doesn't get silently merged into it (which would
+    # both corrupt the running-balance reconciliation at the boundary and,
+    # since both ledgers share the same statement-level "Account No" text,
+    # let a handful of stray rows overwrite the real closing balance).
+    segments: list[list[dict]] = []
+    current: list[dict] = []
+    for blk in blocks:
+        if blk["narration"].strip().upper().startswith("B/F") and current:
+            segments.append(current)
+            current = []
+        current.append(blk)
+    if current:
+        segments.append(current)
+    if len(segments) > 1:
+        blocks = max(segments, key=len)
+        stmt.parse_warnings.append(
+            f"This document contains {len(segments)} separate account ledgers (e.g. a linked PPF or "
+            f"FD sub-account) — used the largest one ({len(blocks)} transactions) and ignored the rest."
+        )
 
     if opening is None and blocks:
         # No explicit opening-balance line found — seed from the first row's

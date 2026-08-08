@@ -1,13 +1,27 @@
-# Bank Statement Analyzer
+# Financial Statement Analyser
 
-A self-hosted Streamlit app that turns bank statement PDFs — password-protected
-or not, from HDFC, ICICI, Kotak, SBI, DBS, or most other Indian banks — into a
-categorized income/spend dashboard, a filterable transaction table, and an
-optional chat panel you can point at Claude's API or a fully local model.
+A self-hosted Streamlit app that pulls together three optional sources of
+your financial life — bank statement PDFs, a personal finance-tracking
+spreadsheet, and an INDmoney portfolio snapshot — into one dashboard: net
+worth, categorized income/spend, investments and SIPs, budget-vs-actual, a
+filterable transaction table, and a chat panel you can point at Claude's API
+or a fully local model.
 
 Everything runs on your own machine (or your own Fly.io app). Parsing and
 categorization never leave the box; the only thing that can leave is what you
 explicitly ask the "Ask AI" tab, and only to whichever model you configure.
+
+## The three data sources (all optional, load any subset)
+
+| Source | What it needs | How fresh |
+|---|---|---|
+| **Bank statements** | PDF upload, password if any | As current as your last download |
+| **Personal finance sheet** | `.xlsx` upload | As current as your last export from Drive |
+| **INDmoney portfolio** | JSON upload | A point-in-time snapshot — see [below](#3--indmoney-portfolio-snapshot) for the refresh workflow |
+
+None of these are live API integrations the app polls on its own — each is a
+file you hand it, the same way you'd hand it a bank statement. That's a
+deliberate choice, not a shortcut: see why under each source below.
 
 ## Features
 
@@ -15,21 +29,33 @@ explicitly ask the "Ask AI" tab, and only to whichever model you configure.
   memory (pypdf), nothing is written to disk unencrypted.
 - **Multi-bank parsing** — a bank-agnostic engine reconciles every transaction
   against the statement's own printed running balance, so it isn't hostage to
-  knowing each bank's exact column layout. HDFC and ICICI have been tuned
-  against real statements; Kotak/SBI/DBS use sensible defaults (see
-  [Supported banks](#supported-banks--parsing-notes)).
+  knowing each bank's exact column layout. Also detects and separates linked
+  sub-account ledgers (e.g. a PPF account printed in the same PDF as your
+  savings account) so they don't get merged into the wrong statement. HDFC
+  and ICICI have been tuned against real statements; Kotak/SBI/DBS use
+  sensible defaults (see [Supported banks](#supported-banks--parsing-notes)).
 - **Editable categorization** — a keyword-rule YAML file drives spend/income
   categories, editable from the sidebar with no code changes.
 - **Multi-statement / multi-bank** — upload several accounts at once; an
   optional heuristic flags likely transfers between your own accounts so they
   don't get double-counted as both spend and income.
+- **Net worth** — combines INDmoney's portfolio total (assets by type, sector,
+  market cap, loans, credit cards) with your personal sheet's manually-tracked
+  totals and your banks' latest closing balances, clearly labeled by source
+  rather than silently merged into one number that might double-count.
+- **Investments & SIPs** — INDmoney holdings by asset type with P&L, active
+  SIPs and total monthly commitment, sector/market-cap breakdowns.
+- **Budget vs. actual** — compares your personal sheet's planned monthly
+  budget against your real average monthly spend per category, computed from
+  categorized bank transactions.
 - **Dashboard** — income by source, spend by category, month-over-month
   trend, and balance-over-time charts (Plotly).
 - **Raw data table** — filter by bank/category/direction/search text, flag
   low-confidence parsed rows for review, export to CSV.
 - **Ask AI (optional)** — a chat panel backed by either Claude's API or any
   local OpenAI-compatible model server (Ollama, LM Studio, vLLM), using tool
-  calls to query your real transaction data rather than guessing numbers.
+  calls across all three data sources to answer from real numbers rather
+  than guessing.
 - **Docker + Fly.io ready** — one Dockerfile, one `fly.toml`.
 
 ## Quickstart — run locally (no Docker)
@@ -43,8 +69,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open http://localhost:8501, upload a statement in the sidebar, enter its
-password if it has one, and click **Parse statements**.
+Open http://localhost:8501, upload whichever data sources you have in the
+sidebar (bank statement PDFs, personal sheet, INDmoney snapshot — any subset),
+and click **Parse statements** for the PDFs (the other two parse immediately
+on upload).
 
 ## Quickstart — Docker
 
@@ -99,16 +127,18 @@ By default the app scales to zero when idle (`auto_stop_machines = "stop"` in
 first request after a while just takes a few seconds longer to wake it up.
 
 **A note on hosting this remotely at all:** you're uploading bank statements
-to a server. Fly's free/hobby tier is a single small VM you control, not a
-shared platform reading your data, but if that tradeoff doesn't sit right for
-your statements, the local/Docker path keeps everything on your own machine.
+(and, if you use them, your personal net-worth spreadsheet and portfolio
+snapshot) to a server. Fly's free/hobby tier is a single small VM you
+control, not a shared platform reading your data, but if that tradeoff
+doesn't sit right for data this sensitive, the local/Docker path keeps
+everything on your own machine.
 
 ## Connecting an LLM for the "Ask AI" tab
 
 The chat panel is entirely optional — everything else in the app works
 without it. When enabled, it uses tool calling so the model looks up real
-numbers from your parsed data (category totals, monthly trends, filtered
-transaction search) instead of guessing.
+numbers from whichever data sources are loaded (bank transactions, personal
+sheet, INDmoney portfolio) instead of guessing.
 
 ### Option A — Claude API
 
@@ -124,8 +154,9 @@ transaction search) instead of guessing.
    picks those up as defaults.
 
 **Privacy:** using this option sends tool-call *results* (category totals,
-matching transaction rows — never the raw PDF) to Anthropic's API each time
-you ask a question. If that's not acceptable for your statements, use a local
+matching transaction rows, portfolio/sheet figures — never the raw PDF,
+sheet, or JSON files themselves) to Anthropic's API each time you ask a
+question. If that's not acceptable for data this sensitive, use a local
 model instead.
 
 **Cost:** this is metered API usage, billed by Anthropic separately from any
@@ -169,7 +200,7 @@ support tool calling through Ollama; very small models often don't.
 | Bank | Status |
 |---|---|
 | HDFC | Tuned and verified against real statements — reconciles exactly. |
-| ICICI | Tuned and verified against real statements — typically reconciles within ~1%. |
+| ICICI | Tuned and verified against real statements — typically reconciles within ~1%. Also handles ICICI's habit of printing a linked PPF sub-account ledger in the same PDF (auto-detected and excluded from the main statement). |
 | Kotak, SBI, DBS | Generic profile, not yet verified against real statements from these banks. |
 
 The parser works in two passes:
@@ -185,7 +216,10 @@ The parser works in two passes:
    running balance started, the direction and size of every later
    transaction can be derived from how much the balance moved — no
    bank-specific column parsing required. This is what makes Kotak/SBI/DBS
-   support possible without sample statements to hand-tune against.
+   support possible without sample statements to hand-tune against. It also
+   detects multiple ledgers in one PDF (a linked PPF/FD sub-account) by
+   splitting on repeated opening-balance ("B/F") lines and keeping only the
+   largest one as the main statement.
 
 Every parsed statement's running balance is checked against its own printed
 closing balance (the **Parsing Details** tab shows this per file). A clean
@@ -209,7 +243,7 @@ need bank-specific changes — the profile is the extension point.
 
 `src/rules_default.yaml` ships with a broad default rule set (salary,
 loans/EMI, investments, insurance, shopping, food delivery, medical, travel,
-utilities, etc). Open **2 · Categorization rules → Edit rules (YAML)** in the
+utilities, etc). Open **4 · Categorization rules → Edit rules (YAML)** in the
 sidebar to add your own — common additions:
 
 - Family members' names, for transfers you make/receive regularly
@@ -232,29 +266,104 @@ around doesn't inflate either number. It's a heuristic, not a certainty;
 review flagged rows in the raw data table (category = "Internal Transfer (own
 accounts)") if a total looks off.
 
+## 2 · Personal finance sheet
+
+If you keep a personal spreadsheet tracking investments, a monthly budget, or
+a property loan, the app can read it — as a plain `.xlsx` upload (sidebar,
+section 2), the same pattern as a bank statement, not a live Google Sheets
+API connection. Live API access would mean this app holding a standing
+credential to your Drive; a file you export when you want fresh numbers
+keeps the same one-shot trust model as everything else here.
+
+**To get the file:** open your sheet in Google Sheets → File → Download →
+Microsoft Excel (.xlsx), then upload that file in the sidebar.
+
+**What it reads**, from a spreadsheet built around four tabs (adjust
+`src/sources/personal_sheet.py` if your own sheet's tab names or layout
+differ — see that file's docstrings for the exact layout each parser
+expects):
+
+- **Investments** tab → itemized holdings by section (mutual funds, FDs,
+  RDs, savings, provident fund, fixed assets, liabilities) — feeds the Net
+  Worth tab.
+- **MonthlyYearly Expenses** tab → your planned monthly budget — feeds
+  Budget vs. Actual.
+- **NirmanPayments** tab (or similarly named) → a property loan's EMI
+  schedule (date/interest/principal) and summary stats — feeds the EMI chart
+  in Budget vs. Actual. The rest of that tab (ad-hoc payment notes, disbursement
+  timelines) is too unstructured to parse reliably and is left out.
+- **My_Savings_Investments** tab (or similarly named) → just the "Total
+  Surplus" figure and any per-property equity-share breakdown, since the
+  rest of that tab tends to re-aggregate the Investments tab.
+
+**Two tabs are never opened**, by name pattern (`trading`, `saving[s]_?scheme`
+— case-insensitive): whatever you use those for stays untouched.
+
+## 3 · INDmoney portfolio snapshot
+
+INDmoney data in this app comes from Claude's INDmoney connector (an MCP
+tool), which is only available *inside a Claude conversation* — a
+standalone, deployed Streamlit app has no way to call it. So this is a
+periodic manual export rather than a live "connect your account" integration:
+you ask Claude to pull your portfolio into a JSON file using the connector,
+then upload that file here (sidebar, section 3) the same way you'd upload a
+bank statement. Refresh it whenever you want current numbers.
+
+**To generate a snapshot**, in a Claude conversation with the INDmoney
+connector available, ask something like:
+
+> Using the INDmoney tools, call `networth_snapshot`, then `networth_holdings`
+> for each asset type that has a non-zero value in that snapshot (typically
+> MF, IND_STOCK, US_STOCK, EPF, PPF, FD), then `mf_sips` and
+> `indian_stocks_sips`. Assemble the results into one JSON file with this
+> exact shape and give it to me to download:
+> ```json
+> {
+>   "exported_at": "<current ISO8601 timestamp>",
+>   "networth_snapshot": { ...raw networth_snapshot result... },
+>   "holdings": { "MF": [...], "IND_STOCK": [...], "...": [...] },
+>   "sips": { "mf": [...raw mf_sips result...], "stocks": [...raw indian_stocks_sips result...] }
+> }
+> ```
+
+Upload the resulting file in the sidebar. `src/sources/indmoney.py` has the
+full schema this parser expects if you want to build the export differently.
+
+**Privacy note specific to this source:** because the export happens inside
+a Claude conversation, that data already passed through Claude once before
+it ever reaches this app — the same privacy consideration as the Ask AI tab
+(see [Connecting an LLM](#connecting-an-llm-for-the-ask-ai-tab)) applies to
+generating the snapshot itself, regardless of which LLM option you pick
+inside the app afterward.
+
 ## Project layout
 
 ```
-app.py                     Streamlit UI — the only file that talks to Streamlit
+app.py                        Streamlit UI — the only file that talks to Streamlit
 src/
-  models.py                 Transaction / Statement dataclasses
-  pdf_utils.py               decrypt + text/table extraction (pypdf + pdfplumber)
-  bank_detect.py              bank identification from statement letterhead
+  models.py                    Transaction / Statement dataclasses
+  pdf_utils.py                  decrypt + text/table extraction (pypdf + pdfplumber)
+  bank_detect.py                 bank identification from statement letterhead
   parsers/
-    profiles.py               per-bank tuning knobs — start here for a new bank
-    table_engine.py            structured extraction when the PDF has real tables
-    line_engine.py             bank-agnostic balance-reconciliation fallback
-    utils.py                   shared regex/date/amount helpers
-  categorize.py                keyword rule engine
-  rules_default.yaml           the default rule set (editable from the UI)
-  analysis.py                   category/monthly summaries, transfer detection
+    profiles.py                  per-bank tuning knobs — start here for a new bank
+    table_engine.py               structured extraction when the PDF has real tables
+    line_engine.py                bank-agnostic balance-reconciliation fallback
+    utils.py                      shared regex/date/amount helpers
+  categorize.py                 keyword rule engine
+  rules_default.yaml            the default rule set (editable from the UI)
+  analysis.py                    category/monthly summaries, transfer detection
+  budget_compare.py              maps sheet budget categories onto spend categories
+  sources/
+    personal_sheet.py             personal finance-tracking .xlsx parser
+    indmoney.py                    INDmoney portfolio snapshot (JSON) parser
   llm/
-    base.py                     shared LLMClient interface + system prompt
-    anthropic_client.py          Claude API backend (native tool use)
-    openai_compatible.py         Ollama/LM Studio/vLLM/OpenAI backend
-    tools.py                     the query functions the model can call
-    chat.py                      client factory
-  ui/charts.py                   Plotly figure builders
+    context.py                    bundles all loaded data sources for the tools
+    base.py                       shared LLMClient interface + system prompt
+    anthropic_client.py           Claude API backend (native tool use)
+    openai_compatible.py          Ollama/LM Studio/vLLM/OpenAI backend
+    tools.py                      the query functions the model can call
+    chat.py                       client factory
+  ui/charts.py                    Plotly figure builders
 ```
 
 ## Troubleshooting
@@ -271,6 +380,17 @@ src/
 - **"That password didn't work"** — some banks use a different case/format
   than you'd expect (e.g. PAN in caps, or DOB as DDMMYYYY) — check the
   password hint your bank's statement email gives you.
+- **"Couldn't parse this sheet"** — your tab names or layout likely differ
+  from what `src/sources/personal_sheet.py` expects; open that file and
+  compare its docstrings against your sheet's actual structure.
+- **Budget vs. Actual is empty** — the category names in your sheet's budget
+  tab don't match any entry in `BUDGET_TO_SPEND_CATEGORY` in
+  `src/budget_compare.py`; add your own sheet's category names there.
+- **Net worth numbers look duplicated** — the Net Worth tab intentionally
+  shows INDmoney and the personal sheet as separate panels rather than
+  merging them, since anything you track manually *and* link in INDmoney
+  (e.g. mutual funds) would otherwise be double-counted. Treat the personal
+  sheet panel as "what INDmoney doesn't already cover."
 - **Local model chat gives vague answers** — it likely fell back to the
   non-tool-calling path; try a model/server combination that supports OpenAI
   function calling (see [Option B](#option-b--a-local-model-nothing-leaves-your-machine)).
@@ -279,11 +399,17 @@ src/
 
 ## Security notes
 
-- Uploaded PDFs and their passwords live only in the Streamlit process's
-  memory for the session — nothing is written to disk by default.
+- Uploaded PDFs, spreadsheets, JSON snapshots, and any passwords live only in
+  the Streamlit process's memory for the session — nothing is written to disk
+  by default.
 - Category rules and chat history are session state only; closing the tab
   clears them (nothing is persisted unless you add your own storage).
-- If you use Claude API, tool-call results are sent to Anthropic per query —
-  see [Option A](#option-a--claude-api) above.
-- Don't commit a `.env` file or paste API keys into files you commit —
-  `.gitignore` already excludes `.env` and `.streamlit/secrets.toml`.
+- If you use Claude API in the Ask AI tab, tool-call results are sent to
+  Anthropic per query — see [Option A](#option-a--claude-api) above.
+- The INDmoney snapshot's *generation* (not its use inside this app) happens
+  in a separate Claude conversation with the INDmoney connector — see the
+  privacy note under [INDmoney portfolio snapshot](#3--indmoney-portfolio-snapshot).
+- Don't commit a `.env` file, an exported sheet/snapshot, or API keys into
+  files you commit — `.gitignore` already excludes `.env`,
+  `.streamlit/secrets.toml`, and `data/` (a reasonable place to keep your own
+  exports locally without risking an accidental commit).

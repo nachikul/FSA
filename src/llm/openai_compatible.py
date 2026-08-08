@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 
-import pandas as pd
-
 from ..analysis import category_summary, headline_stats, monthly_summary
+from ..sources.personal_sheet import section_totals
 from .base import SYSTEM_PROMPT, LLMClient, LLMError
+from .context import AppContext
 from .tools import TOOLS, execute_tool
 
 MAX_TOOL_ROUNDS = 6
@@ -30,22 +30,42 @@ def _to_openai_tools(tools: list[dict]) -> list[dict]:
     ]
 
 
-def _fallback_context(df: pd.DataFrame) -> str:
+def _fallback_context(ctx: AppContext) -> str:
     """A compact, human-readable data summary for models that can't call tools."""
-    if df.empty:
-        return "No transactions are loaded."
-    stats = headline_stats(df)
-    spend = category_summary(df, "debit").round(2).to_dict(orient="records")
-    income = category_summary(df, "credit").round(2).to_dict(orient="records")
-    monthly = monthly_summary(df).round(2).to_dict(orient="records")
-    return (
-        f"SUMMARY: {json.dumps(stats, default=str)}\n"
-        f"SPEND BY CATEGORY: {json.dumps(spend, default=str)}\n"
-        f"INCOME BY CATEGORY: {json.dumps(income, default=str)}\n"
-        f"MONTHLY: {json.dumps(monthly, default=str)}\n"
-        "(This is a pre-computed summary, not the raw ledger — answer from it as best you can "
+    parts = []
+    df = ctx.transactions
+    if df is not None and not df.empty:
+        stats = headline_stats(df)
+        spend = category_summary(df, "debit").round(2).to_dict(orient="records")
+        income = category_summary(df, "credit").round(2).to_dict(orient="records")
+        monthly = monthly_summary(df).round(2).to_dict(orient="records")
+        parts.append(
+            f"BANK SUMMARY: {json.dumps(stats, default=str)}\n"
+            f"SPEND BY CATEGORY: {json.dumps(spend, default=str)}\n"
+            f"INCOME BY CATEGORY: {json.dumps(income, default=str)}\n"
+            f"MONTHLY: {json.dumps(monthly, default=str)}"
+        )
+    else:
+        parts.append("No bank statements are loaded.")
+
+    if ctx.portfolio is not None:
+        p = ctx.portfolio
+        parts.append(
+            f"INDMONEY NET WORTH: invested={p.total_invested:.2f} current={p.total_current_value:.2f} "
+            f"networth={p.total_networth:.2f} liabilities={p.liabilities_total:.2f}\n"
+            f"BY ASSET TYPE: {json.dumps(p.by_asset_type.round(2).to_dict(orient='records'), default=str)}"
+        )
+
+    if ctx.sheet is not None and ctx.sheet.investments:
+        parts.append(
+            f"PERSONAL SHEET SECTION TOTALS: {json.dumps(section_totals(ctx.sheet.investments).round(2).to_dict(orient='records'), default=str)}"
+        )
+
+    parts.append(
+        "(This is a pre-computed summary, not the raw data — answer from it as best you can "
         "and say so if the question needs row-level detail you don't have.)"
     )
+    return "\n\n".join(parts)
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -62,13 +82,13 @@ class OpenAICompatibleClient(LLMClient):
         self.model = model
         self._tools = _to_openai_tools(TOOLS)
 
-    def ask(self, question: str, df: pd.DataFrame, history: list[dict]) -> str:
+    def ask(self, question: str, ctx: AppContext, history: list[dict]) -> str:
         try:
-            return self._ask_with_tools(question, df, history)
+            return self._ask_with_tools(question, ctx, history)
         except Exception:
-            return self._ask_fallback(question, df, history)
+            return self._ask_fallback(question, ctx, history)
 
-    def _ask_with_tools(self, question: str, df: pd.DataFrame, history: list[dict]) -> str:
+    def _ask_with_tools(self, question: str, ctx: AppContext, history: list[dict]) -> str:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(history) + [
             {"role": "user", "content": question}
         ]
@@ -95,13 +115,13 @@ class OpenAICompatibleClient(LLMClient):
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = execute_tool(tc.function.name, args, df)
+                result = execute_tool(tc.function.name, args, ctx)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
         return "I wasn't able to finish looking that up in a reasonable number of steps — try a narrower question."
 
-    def _ask_fallback(self, question: str, df: pd.DataFrame, history: list[dict]) -> str:
-        context = _fallback_context(df)
+    def _ask_fallback(self, question: str, ctx: AppContext, history: list[dict]) -> str:
+        context = _fallback_context(ctx)
         messages = (
             [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context}]
             + list(history)

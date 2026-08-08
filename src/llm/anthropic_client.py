@@ -2,9 +2,8 @@
 grounds its answers in real query results against your data."""
 from __future__ import annotations
 
-import pandas as pd
-
 from .base import SYSTEM_PROMPT, LLMClient, LLMError
+from .context import AppContext
 from .tools import TOOLS, execute_tool
 
 MAX_TOOL_ROUNDS = 6
@@ -22,7 +21,7 @@ class AnthropicClient(LLMClient):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
 
-    def ask(self, question: str, df: pd.DataFrame, history: list[dict]) -> str:
+    def ask(self, question: str, ctx: AppContext, history: list[dict]) -> str:
         messages = list(history) + [{"role": "user", "content": question}]
 
         for _ in range(MAX_TOOL_ROUNDS):
@@ -45,7 +44,7 @@ class AnthropicClient(LLMClient):
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    result = execute_tool(block.name, block.input, df)
+                    result = execute_tool(block.name, block.input, ctx)
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": block.id, "content": result}
                     )
