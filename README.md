@@ -70,10 +70,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open http://localhost:8501, upload whichever data sources you have in the
-sidebar (bank statement PDFs, personal sheet, INDmoney snapshot — any subset),
-and click **Parse statements** for the PDFs (the other two parse immediately
-on upload).
+Open http://localhost:8501 and drop whichever files you have (bank statement
+PDFs, personal sheet, INDmoney snapshot — any subset) into the sidebar's
+uploader. Each file gets a "Type" dropdown — Bank Statement, Personal
+Finance, or Portfolio — defaulted from its extension; everything parses
+automatically as soon as it's tagged (bank statements also get an optional
+bank hint and password field, since some are password-protected).
 
 ## Quickstart — Docker
 
@@ -276,7 +278,7 @@ need bank-specific changes — the profile is the extension point.
 
 `src/rules_default.yaml` ships with a broad default rule set (salary,
 loans/EMI, investments, insurance, shopping, food delivery, medical, travel,
-utilities, etc). Open **4 · Categorization rules → Edit rules (YAML)** in the
+utilities, etc). Open **Categorization rules → Edit rules (YAML)** in the
 sidebar to add your own — common additions:
 
 - Family members' names, for transfers you make/receive regularly
@@ -303,13 +305,14 @@ accounts)") if a total looks off.
 
 If you keep a personal spreadsheet tracking investments, a monthly budget, or
 a property loan, the app can read it — as a plain `.xlsx` upload (sidebar,
-section 2), the same pattern as a bank statement, not a live Google Sheets
-API connection. Live API access would mean this app holding a standing
-credential to your Drive; a file you export when you want fresh numbers
-keeps the same one-shot trust model as everything else here.
+tagged "Personal Finance"), the same pattern as a bank statement, not a live
+Google Sheets API connection. Live API access would mean this app holding a
+standing credential to your Drive; a file you export when you want fresh
+numbers keeps the same one-shot trust model as everything else here.
 
 **To get the file:** open your sheet in Google Sheets → File → Download →
-Microsoft Excel (.xlsx), then upload that file in the sidebar.
+Microsoft Excel (.xlsx), then upload that file in the sidebar and tag it
+"Personal Finance".
 
 **What it reads**, from a spreadsheet built around four tabs (adjust
 `src/sources/personal_sheet.py` if your own sheet's tab names or layout
@@ -348,8 +351,8 @@ separate, INDmoney-operated endpoint, not something routed through Claude.
 client against it directly, so the app can pull a fresh snapshot itself
 without Claude in the loop at all.
 
-Click **Connect INDmoney** in the sidebar (section 3 → "Connect live (local
-use only)"). This:
+Click **Connect INDmoney** in the sidebar's "🔗 Connect INDmoney live instead"
+expander (below the file uploader). This:
 
 1. Registers this app as an OAuth client with INDmoney (happens silently,
    once per session — no manual approval step on INDmoney's side).
@@ -377,7 +380,7 @@ use only)"). This:
 
 This is the original approach: ask Claude — in a separate conversation, using
 Claude's own INDmoney connector — to export your portfolio to a JSON file,
-then upload that file here (sidebar, section 3, below the "— or —" divider)
+then upload that file in the sidebar's file uploader and tag it "Portfolio",
 the same way you'd upload a bank statement. Refresh it whenever you want
 current numbers. This is the only option available on a hosted deployment,
 since Option A's redirect can't reach a non-localhost app.

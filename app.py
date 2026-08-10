@@ -67,12 +67,10 @@ require_password()  # no-op unless APP_PASSWORD is set — see src/auth.py
 # ----------------------------------------------------------------------------
 defaults = {
     "statements": [],
-    "parse_errors": [],
     "rules_yaml": load_default_rules(),
     "chat_history": [],
     "detect_transfers": True,
     "sheet_data": None,
-    "sheet_error": None,
     "portfolio": None,
     "portfolio_error": None,
     "indmoney_client_creds": None,
@@ -88,7 +86,8 @@ INDMONEY_REDIRECT_URI = os.environ.get("APP_BASE_URL", "http://localhost:8501") 
 
 # Handle the OAuth redirect landing back on this same app (query params
 # carry the authorization code) — must run before the sidebar renders, so
-# section 3 below reflects the just-completed connection immediately.
+# the sidebar's live-connect status reflects the just-completed connection
+# immediately once it renders below.
 _qp = st.query_params
 if "code" in _qp and st.session_state.indmoney_pending_auth is not None:
     try:
@@ -112,118 +111,127 @@ if "code" in _qp and st.session_state.indmoney_pending_auth is not None:
         st.query_params.clear()
 
 # ----------------------------------------------------------------------------
-# Sidebar — 1. Bank statements
+# Sidebar — Upload files
 # ----------------------------------------------------------------------------
-st.sidebar.header("1 · Bank statements")
-uploaded_files = st.sidebar.file_uploader(
-    "Bank statement PDFs — password-protected is fine",
-    type=["pdf"],
+FILE_TYPE_OPTIONS = ["Bank Statement", "Personal Finance", "Portfolio"]
+_EXT_DEFAULT_TYPE = {"pdf": "Bank Statement", "xlsx": "Personal Finance", "json": "Portfolio"}
+
+
+@st.cache_data(show_spinner=False)
+def _parse_bank_bytes(file_bytes: bytes, filename: str, password: str | None, bank_hint: str | None):
+    with open_pdf(file_bytes, password) as pdf:
+        text = full_text(pdf)
+        return parse_statement(pdf, text, source_file=filename, bank_hint=bank_hint)
+
+
+@st.cache_data(show_spinner=False)
+def _parse_sheet_bytes(file_bytes: bytes) -> PersonalFinanceData:
+    return load_personal_sheet(file_bytes)
+
+
+@st.cache_data(show_spinner=False)
+def _parse_portfolio_bytes(file_bytes: bytes):
+    return load_indmoney_snapshot(file_bytes)
+
+
+st.sidebar.header("Upload files")
+uploaded = st.sidebar.file_uploader(
+    "Bank statement PDFs, your personal finance sheet (.xlsx), or an INDmoney portfolio snapshot (.json)",
+    type=["pdf", "xlsx", "json"],
     accept_multiple_files=True,
+    help="Upload any mix of these — tag each one below with what it is.",
 )
 
-file_configs: dict[str, dict] = {}
-if uploaded_files:
-    for f in uploaded_files:
+new_statements: list = []
+new_sheet_data = None
+new_portfolio = None
+
+if uploaded:
+    st.session_state.detect_transfers = st.sidebar.checkbox(
+        "Detect transfers between my own accounts",
+        value=st.session_state.detect_transfers,
+        help=(
+            "When statements from 2+ accounts are loaded, flags matching debit/credit pairs "
+            "(same amount, within a few days, different accounts) as internal transfers so "
+            "they aren't double-counted as income and spend."
+        ),
+    )
+    for f in uploaded:
+        ext = f.name.rsplit(".", 1)[-1].lower()
+        default_type = _EXT_DEFAULT_TYPE.get(ext, "Bank Statement")
         with st.sidebar.expander(f.name, expanded=False):
-            bank_choice = st.selectbox(
-                "Bank", ["Auto-detect"] + SUPPORTED_BANKS, key=f"bank_{f.name}"
+            file_type = st.selectbox(
+                "Type", FILE_TYPE_OPTIONS, index=FILE_TYPE_OPTIONS.index(default_type), key=f"type_{f.name}"
             )
-            pwd = st.text_input("Password (blank if none)", type="password", key=f"pwd_{f.name}")
-        file_configs[f.name] = {
-            "file": f,
-            "bank": None if bank_choice == "Auto-detect" else bank_choice,
-            "password": pwd or None,
-        }
+            file_bytes = f.getvalue()
 
-st.session_state.detect_transfers = st.sidebar.checkbox(
-    "Detect transfers between my own accounts",
-    value=st.session_state.detect_transfers,
-    help=(
-        "When statements from 2+ accounts are loaded, flags matching debit/credit pairs "
-        "(same amount, within a few days, different accounts) as internal transfers so "
-        "they aren't double-counted as income and spend."
-    ),
-)
+            if file_type == "Bank Statement":
+                bank_choice = st.selectbox("Bank", ["Auto-detect"] + SUPPORTED_BANKS, key=f"bank_{f.name}")
+                pwd = st.text_input("Password (blank if none)", type="password", key=f"pwd_{f.name}")
+                bank_hint = None if bank_choice == "Auto-detect" else bank_choice
+                try:
+                    with st.spinner("Reading statement…"):
+                        stmt = _parse_bank_bytes(file_bytes, f.name, pwd or None, bank_hint)
+                    new_statements.append(stmt)
+                    st.success(f"Parsed — {len(stmt.transactions)} transactions")
+                except PasswordRequiredError:
+                    st.warning("Password-protected — enter the password above.")
+                except WrongPasswordError:
+                    st.error("That password didn't work.")
+                except PdfParseError as exc:
+                    st.error(str(exc))
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Unexpected error: {exc}")
 
-parse_clicked = st.sidebar.button("Parse statements", type="primary", disabled=not uploaded_files)
+            elif file_type == "Personal Finance":
+                try:
+                    new_sheet_data = _parse_sheet_bytes(file_bytes)
+                    st.success(
+                        f"Loaded {len(new_sheet_data.sheets_found)} tabs, "
+                        f"skipped: {', '.join(new_sheet_data.skipped_sheets) or 'none'}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Couldn't parse this sheet: {exc}")
 
-if parse_clicked:
-    statements, errors = [], []
-    with st.spinner("Reading statements…"):
-        for name, cfg in file_configs.items():
-            file_bytes = cfg["file"].getvalue()
-            try:
-                with open_pdf(file_bytes, cfg["password"]) as pdf:
-                    text = full_text(pdf)
-                    stmt = parse_statement(pdf, text, source_file=name, bank_hint=cfg["bank"])
-                statements.append(stmt)
-            except PasswordRequiredError:
-                errors.append(f"**{name}** — this file is password-protected. Enter its password and re-parse.")
-            except WrongPasswordError:
-                errors.append(f"**{name}** — that password didn't work. Double-check it and re-parse.")
-            except PdfParseError as exc:
-                errors.append(f"**{name}** — {exc}")
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"**{name}** — unexpected error: {exc}")
-    st.session_state.statements = statements
-    st.session_state.parse_errors = errors
+            else:  # Portfolio
+                try:
+                    new_portfolio = _parse_portfolio_bytes(file_bytes)
+                    st.success(f"Portfolio data from {new_portfolio.exported_at or 'unknown time'}")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Couldn't parse this snapshot: {exc}")
 
-for err in st.session_state.parse_errors:
-    st.sidebar.error(err)
+st.session_state.statements = new_statements
+if new_sheet_data is not None:
+    st.session_state.sheet_data = new_sheet_data
+if new_portfolio is not None:
+    st.session_state.portfolio = new_portfolio
 
-# ----------------------------------------------------------------------------
-# Sidebar — 2. Personal finance sheet (optional)
-# ----------------------------------------------------------------------------
-st.sidebar.header("2 · Personal finance sheet")
-sheet_file = st.sidebar.file_uploader(
-    "Investments.xlsx export (optional)",
-    type=["xlsx"],
-    help=(
-        "Download your personal tracking sheet from Google Drive as .xlsx and upload it here. "
-        "'Trading Schemes' and 'Savings_Schemes' tabs are never read. See README.md for details."
-    ),
-)
-if sheet_file is not None:
-    try:
-        st.session_state.sheet_data = load_personal_sheet(sheet_file.getvalue())
-        st.session_state.sheet_error = None
-    except Exception as exc:  # noqa: BLE001
-        st.session_state.sheet_data = None
-        st.session_state.sheet_error = f"Couldn't parse this sheet: {exc}"
-if st.session_state.sheet_error:
-    st.sidebar.error(st.session_state.sheet_error)
-elif st.session_state.sheet_data is not None:
-    sd: PersonalFinanceData = st.session_state.sheet_data
-    st.sidebar.caption(f"Loaded {len(sd.sheets_found)} tabs, skipped: {', '.join(sd.skipped_sheets) or 'none'}")
-
-# ----------------------------------------------------------------------------
-# Sidebar — 3. INDmoney portfolio (optional)
-# ----------------------------------------------------------------------------
-st.sidebar.header("3 · INDmoney portfolio")
-
+# -- INDmoney live connect — nested/secondary, not a top-level section ------
 tokens = st.session_state.indmoney_tokens
 if tokens is not None:
     mins_left = max(0, int((tokens.expires_at - time.time()) / 60))
-    st.sidebar.success(f"✅ Connected live — session token valid ~{mins_left} min")
-    c1, c2 = st.sidebar.columns(2)
-    if c1.button("Refresh now"):
-        try:
-            with st.spinner("Fetching latest portfolio…"):
-                live_data = fetch_live_snapshot(tokens.access_token)
-                st.session_state.portfolio = parse_indmoney_data(live_data)
-            st.session_state.portfolio_error = None
-        except MCPError as exc:
-            st.session_state.portfolio_error = f"Live refresh failed: {exc}"
-        st.rerun()
-    if c2.button("Disconnect"):
-        if st.session_state.indmoney_client_creds:
-            revoke(st.session_state.indmoney_client_creds, tokens)
-        st.session_state.indmoney_tokens = None
-        st.session_state.indmoney_client_creds = None
-        st.rerun()
+    with st.sidebar.expander(f"✅ INDmoney connected live (~{mins_left} min left)", expanded=False):
+        c1, c2 = st.columns(2)
+        if c1.button("Refresh now"):
+            try:
+                with st.spinner("Fetching latest portfolio…"):
+                    live_data = fetch_live_snapshot(tokens.access_token)
+                    st.session_state.portfolio = parse_indmoney_data(live_data)
+                st.session_state.portfolio_error = None
+            except MCPError as exc:
+                st.session_state.portfolio_error = f"Live refresh failed: {exc}"
+            st.rerun()
+        if c2.button("Disconnect"):
+            if st.session_state.indmoney_client_creds:
+                revoke(st.session_state.indmoney_client_creds, tokens)
+            st.session_state.indmoney_tokens = None
+            st.session_state.indmoney_client_creds = None
+            st.rerun()
+        if st.session_state.portfolio_error:
+            st.error(st.session_state.portfolio_error)
 else:
     pending = st.session_state.indmoney_pending_auth
-    with st.sidebar.expander("Connect live (local use only)", expanded=pending is not None):
+    with st.sidebar.expander("🔗 Connect INDmoney live instead", expanded=pending is not None):
         st.caption(
             "Logs you into INDmoney directly (mobile + OTP + MPIN, on their own site — never "
             "seen by this app) and pulls your portfolio over their official MCP server. Local "
@@ -248,32 +256,13 @@ else:
                 st.session_state.indmoney_pending_auth = None
                 st.session_state.indmoney_authorize_url = None
                 st.rerun()
-
-if st.session_state.indmoney_live_error:
-    st.sidebar.error(f"Live connection failed: {st.session_state.indmoney_live_error}")
-
-st.sidebar.caption("— or —")
-indmoney_file = st.sidebar.file_uploader(
-    "Upload a portfolio snapshot JSON instead",
-    type=["json"],
-    help="See README.md > 'INDmoney portfolio' for the export prompt that generates this file.",
-)
-if indmoney_file is not None:
-    try:
-        st.session_state.portfolio = load_indmoney_snapshot(indmoney_file.getvalue())
-        st.session_state.portfolio_error = None
-    except Exception as exc:  # noqa: BLE001
-        st.session_state.portfolio = None
-        st.session_state.portfolio_error = f"Couldn't parse this snapshot: {exc}"
-if st.session_state.portfolio_error:
-    st.sidebar.error(st.session_state.portfolio_error)
-elif st.session_state.portfolio is not None:
-    st.sidebar.caption(f"Portfolio data from {st.session_state.portfolio.exported_at or 'unknown time'}")
+        if st.session_state.indmoney_live_error:
+            st.error(f"Live connection failed: {st.session_state.indmoney_live_error}")
 
 # ----------------------------------------------------------------------------
-# Sidebar — 4. Categorization rules
+# Sidebar — Categorization rules
 # ----------------------------------------------------------------------------
-st.sidebar.header("4 · Categorization rules")
+st.sidebar.header("Categorization rules")
 with st.sidebar.expander("Edit rules (YAML)"):
     st.caption(
         "First matching rule wins, top to bottom. Add merchants, family members, or "
@@ -297,7 +286,7 @@ with st.sidebar.expander("Edit rules (YAML)"):
 # ----------------------------------------------------------------------------
 # Sidebar — 5. LLM (optional)
 # ----------------------------------------------------------------------------
-st.sidebar.header("5 · Ask AI (optional)")
+st.sidebar.header("Ask AI (optional)")
 provider = st.sidebar.radio("Model", ["None", "Claude API", "Local model"], index=0)
 
 llm_client = None
@@ -365,7 +354,7 @@ tab_dash, tab_networth, tab_invest, tab_budget, tab_data, tab_chat, tab_debug = 
 # ---- Dashboard (bank statements) -------------------------------------------
 with tab_dash:
     if df.empty:
-        st.info("Upload and parse bank statements (sidebar, section 1) to see this dashboard.")
+        st.info('Upload bank statements and tag them "Bank Statement" (sidebar) to see this dashboard.')
     else:
         stats = headline_stats(df)
         c1, c2, c3, c4 = st.columns(4)
@@ -430,7 +419,7 @@ with tab_networth:
                 st.markdown("**Credit cards**")
                 st.dataframe(portfolio.credit_cards, use_container_width=True, hide_index=True)
         else:
-            st.info("No INDmoney snapshot loaded — upload one (sidebar, section 3) for a full net worth view.")
+            st.info('No INDmoney snapshot loaded — upload one tagged "Portfolio" (sidebar) for a full net worth view.')
 
         if sheet is not None and sheet.investments:
             st.divider()
@@ -471,7 +460,7 @@ with tab_networth:
 # ---- Investments & SIPs -----------------------------------------------
 with tab_invest:
     if portfolio is None:
-        st.info("Upload an INDmoney portfolio snapshot (sidebar, section 3) to see this tab.")
+        st.info('Upload an INDmoney portfolio snapshot tagged "Portfolio" (sidebar) to see this tab.')
     else:
         if not portfolio.mf_sips.empty:
             st.subheader("Active SIPs")
@@ -509,9 +498,9 @@ with tab_invest:
 # ---- Budget vs Actual ---------------------------------------------------
 with tab_budget:
     if sheet is None or sheet.budget.empty:
-        st.info("Upload a personal finance sheet with a budget tab (sidebar, section 2) to see this.")
+        st.info('Upload a personal finance sheet tagged "Personal Finance" (sidebar) with a budget tab to see this.')
     elif df.empty:
-        st.info("Also upload and parse bank statements (sidebar, section 1) to compare against actual spend.")
+        st.info('Also upload bank statements tagged "Bank Statement" (sidebar) to compare against actual spend.')
     else:
         compare = build_budget_vs_actual(sheet.budget, df)
         if compare.empty:
@@ -536,7 +525,7 @@ with tab_budget:
 # ---- Raw Data -----------------------------------------------------------
 with tab_data:
     if df.empty:
-        st.info("Upload and parse bank statements (sidebar, section 1) to see this table.")
+        st.info('Upload bank statements tagged "Bank Statement" (sidebar) to see this table.')
     else:
         st.subheader("All transactions")
         f1, f2, f3, f4 = st.columns(4)
