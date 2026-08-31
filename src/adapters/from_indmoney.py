@@ -42,6 +42,7 @@ _VALUE_COLUMNS = ["market_value", "current_value", "currentValueVal"]
 _COST_COLUMNS = ["invested_amount", "invested_value", "investedAmountVal"]
 _QTY_COLUMNS = ["units", "quantity", "qty"]
 _ISIN_COLUMNS = ["isin", "ISIN"]
+_CODE_COLUMNS = ["investment_code", "folio", "folio_no"]
 
 
 def _first_present(row: "pd.Series", candidates: list[str]) -> Optional[object]:
@@ -53,6 +54,19 @@ def _first_present(row: "pd.Series", candidates: list[str]) -> Optional[object]:
 
 def from_indmoney(portfolio: IndmoneyPortfolio) -> list[UnifiedRecord]:
     out: list[UnifiedRecord] = []
+    # INDmoney's row-level holdings export has no ISIN for most asset types
+    # (MF, EPF) and can legitimately list the SAME fund/employer name more
+    # than once — separate SIP lots, or separate PF balances from two stints
+    # at the same employer. Without a disambiguator, every such row would
+    # hash to the same record_id and silently collapse into one during
+    # merge (verified against a real snapshot: 18 of 40 holdings collided
+    # down to 8, understating net worth). Folding a per-(asset_type, key)
+    # occurrence index into the hash keeps each row distinct while staying
+    # stable across re-uploads of the same unchanged snapshot; it can't
+    # disambiguate a lot that's added/removed between two different
+    # snapshots (INDmoney gives us no stable per-lot id to match on), same
+    # limitation identity.py already documents for bank statements.
+    seen_counts: dict[tuple[str, str], int] = {}
 
     for asset_type, df in portfolio.holdings.items():
         if df is None or df.empty:
@@ -66,13 +80,22 @@ def from_indmoney(portfolio: IndmoneyPortfolio) -> list[UnifiedRecord]:
                 continue  # can't build a usable record from this row — see module docstring
 
             isin = _first_present(row, _ISIN_COLUMNS)
+            code = _first_present(row, _CODE_COLUMNS)
             identifier = str(isin) if isin is not None else str(name)
+
+            dedupe_key = (asset_type, str(code) if code is not None else identifier)
+            occurrence = seen_counts.get(dedupe_key, 0)
+            seen_counts[dedupe_key] = occurrence + 1
+            hash_identifier = identifier if occurrence == 0 else f"{identifier}#{occurrence}"
+            if code is not None:
+                hash_identifier = f"{code}|{hash_identifier}"
+
             qty = _first_present(row, _QTY_COLUMNS)
             cost = _first_present(row, _COST_COLUMNS)
 
             out.append(
                 UnifiedRecord(
-                    record_id=make_record_id(SourceSystem.INDMONEY, ACCOUNT_NAME, identifier, asset_class),
+                    record_id=make_record_id(SourceSystem.INDMONEY, ACCOUNT_NAME, hash_identifier, asset_class),
                     asset_class=asset_class,
                     source_system=SourceSystem.INDMONEY,
                     identifier=identifier,

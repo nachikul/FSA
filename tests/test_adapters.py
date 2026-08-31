@@ -89,3 +89,23 @@ def test_from_indmoney_ignores_empty_holdings():
     portfolio = IndmoneyPortfolio()
     portfolio.holdings = {"FD": pd.DataFrame()}
     assert from_indmoney(portfolio) == []
+
+
+def test_from_indmoney_keeps_distinct_lots_of_the_same_fund_without_isin():
+    # Real INDmoney exports list the same fund more than once with no ISIN
+    # column -- separate SIP lots/folios. Each row must survive as its own
+    # record rather than colliding on record_id and merging into one.
+    portfolio = IndmoneyPortfolio()
+    portfolio.holdings = {
+        "MF": pd.DataFrame(
+            [
+                {"investment": "Bandhan ELSS Tax saver Fund - Direct Plan - Growth", "investment_code": "2697", "market_value": 36792.65},
+                {"investment": "Bandhan ELSS Tax saver Fund - Direct Plan - Growth", "investment_code": "2697", "market_value": 8708.75},
+                {"investment": "Bandhan ELSS Tax saver Fund - Direct Plan - Growth", "investment_code": "2697", "market_value": 9425.94},
+            ]
+        )
+    }
+    records = from_indmoney(portfolio)
+    assert len(records) == 3
+    assert len({r.record_id for r in records}) == 3
+    assert {r.current_value for r in records} == {36792.65, 8708.75, 9425.94}
