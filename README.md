@@ -77,6 +77,20 @@ Finance, or Portfolio — defaulted from its extension; everything parses
 automatically as soon as it's tagged (bank statements also get an optional
 bank hint and password field, since some are password-protected).
 
+## Running tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Covers the Portfolio tab's normalization/reconciliation logic
+(`src/core`, `src/adapters`, `src/reconciliation`) plus a Streamlit
+`AppTest` smoke test that runs `app.py` itself end to end, including
+clicking "Apply accepted changes". `requirements-dev.txt` is
+`requirements.txt` plus `pytest` — nothing test-only leaks into the
+runtime image.
+
 ## Quickstart — Docker
 
 ```bash
@@ -443,7 +457,60 @@ src/
     tools.py                      the query functions the model can call
     chat.py                       client factory
   ui/charts.py                    Plotly figure builders
+  core/unified.py                  UnifiedRecord — cross-source schema for the Portfolio tab
+  adapters/                        Statement / InvestmentItem / IndmoneyPortfolio -> UnifiedRecord
+    from_statement.py
+    from_sheet.py
+    from_indmoney.py
+  reconciliation/                  the Portfolio tab's upload-diff-review flow
+    identity.py                    matches a new upload's records against what's already accepted
+    delta.py                       computes the reviewable NEW / CHANGED / POSSIBLY_STALE diff
+    merge_engine.py                applies only the deltas a person accepted
+tests/                            pytest — reconciliation/adapter unit tests + a Streamlit AppTest smoke test
 ```
+
+## Portfolio tab (cross-source view)
+
+The Dashboard, Net Worth, and Investments & SIPs tabs each show one source at
+a time, on purpose (see [Net worth numbers look duplicated](#troubleshooting)
+below). **Portfolio** is different: it's a single view across bank accounts,
+your personal sheet, and INDmoney, built from a normalized `UnifiedRecord`
+(`src/core/unified.py`) rather than each source's own object shape. A sidebar
+filter ("Portfolio view") lets you show or hide whole asset classes; sub-tabs
+inside Portfolio are generated from whatever asset classes are actually
+present, so you won't see an empty tab for something you don't hold.
+
+**Nothing enters this view silently.** The first time (or any time) a
+source's records would be added or changed, they're held in a review queue —
+grouped as new records, changed values, or "missing from this upload" (a
+holding present before but not in this batch, never auto-removed) — and only
+move into the Portfolio tab once you click **Apply accepted changes**. This
+mirrors how "Detect transfers between my own accounts" already works
+elsewhere in the app: a heuristic flags something for you to confirm, it
+never decides on its own.
+
+This review queue, like everything else in this app, is **session-only** —
+it and the records it produces live in Streamlit's `session_state` and are
+gone when the tab closes. A future revision could add opt-in local
+persistence (e.g. a gitignored file under `data/`) so re-uploads can be
+diffed against yesterday's session, not just this one — deliberately left
+out for now rather than silently changing what "nothing is written to disk"
+means for this app.
+
+Two things worth knowing if you extend this:
+
+- **Records aren't deduplicated automatically across sources.** The same
+  mutual fund tracked in both your personal sheet and INDmoney will appear
+  as two separate Portfolio rows — matching how Net Worth already treats
+  them, and avoiding a fuzzy-name-match false positive silently merging two
+  different holdings. `UnifiedRecord.link_group` exists for a future
+  "mark these as the same holding" UI action, but nothing sets it yet.
+- **Only three sources feed this today** — the ones already in the app.
+  `src/core/unified.py`'s `SourceSystem` enum reserves values for direct
+  document ingestion (MF statements, brokerage holdings CSVs, RSU vesting
+  reports, gold statements) that isn't built yet; adding one means a new
+  parser under a (not-yet-created) `src/ingestion/` package plus an adapter
+  in `src/adapters/`, following the same shape as `from_statement.py`.
 
 ## Troubleshooting
 
