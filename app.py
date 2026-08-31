@@ -48,6 +48,12 @@ from src.sources.personal_sheet import (
     load_personal_sheet,
     section_totals,
 )
+from src.adapters.from_indmoney import from_indmoney
+from src.adapters.from_sheet import from_investment_items
+from src.adapters.from_statement import from_statement
+from src.reconciliation.delta import CHANGED, NEW, POSSIBLY_STALE, compute_deltas
+from src.reconciliation.identity import match as match_records
+from src.reconciliation.merge_engine import apply as apply_deltas
 from src.ui.charts import (
     assets_vs_liabilities_bar,
     balance_chart,
@@ -78,9 +84,37 @@ defaults = {
     "indmoney_authorize_url": None,
     "indmoney_tokens": None,
     "indmoney_live_error": None,
+    # Unified cross-source portfolio (see src/core/unified.py). Session-only,
+    # same as everything else here — canonical only grows via explicit
+    # accept in the Portfolio tab's review step, never silently on upload.
+    "unified_records": [],
+    "pending_deltas": [],
+    "pending_staged": {},
+    "portfolio_asset_filter": None,  # None = "all" until the sidebar widget below sets it
 }
 for key, val in defaults.items():
     st.session_state.setdefault(key, val)
+
+
+def _queue_review(new_staged: list) -> None:
+    """Diffs newly staged UnifiedRecords (see src/core/unified.py) against
+    the canonical set already accepted this session, and appends any
+    resulting deltas to the pending review queue — merging with deltas
+    already pending from another source parsed in this same rerun, rather
+    than overwriting them. Canonical itself is untouched here; only the
+    Portfolio tab's "Apply accepted changes" button (below) can change it.
+    """
+    if not new_staged:
+        return
+    matches = match_records(new_staged, st.session_state.unified_records)
+    deltas = compute_deltas(new_staged, st.session_state.unified_records, matches)
+    if deltas:
+        st.session_state.pending_deltas = st.session_state.pending_deltas + deltas
+        st.session_state.pending_staged = {
+            **st.session_state.pending_staged,
+            **{r.record_id: r for r in new_staged},
+        }
+
 
 INDMONEY_REDIRECT_URI = os.environ.get("APP_BASE_URL", "http://localhost:8501") + "/"
 
@@ -103,6 +137,7 @@ if "code" in _qp and st.session_state.indmoney_pending_auth is not None:
         with st.spinner("Connected — fetching your INDmoney portfolio…"):
             live_data = fetch_live_snapshot(tokens.access_token)
             st.session_state.portfolio = parse_indmoney_data(live_data)
+        _queue_review(from_indmoney(st.session_state.portfolio))
         st.session_state.portfolio_error = None
         st.session_state.indmoney_live_error = None
     except (OAuthError, MCPError) as exc:
@@ -206,6 +241,32 @@ if new_sheet_data is not None:
 if new_portfolio is not None:
     st.session_state.portfolio = new_portfolio
 
+# -- Stage this batch for the cross-source Portfolio tab (see src/core/
+# unified.py) and diff it against whatever's already been accepted, so a
+# re-upload gets reviewed instead of silently replacing state. Bank
+# statements/sheet/portfolio above are unaffected either way — this only
+# feeds the additional Portfolio tab.
+_staged_this_batch: list = []
+for stmt in new_statements:
+    _staged_this_batch.extend(from_statement(stmt))
+if new_sheet_data is not None:
+    _staged_this_batch.extend(from_investment_items(new_sheet_data.investments))
+if new_portfolio is not None:
+    _staged_this_batch.extend(from_indmoney(new_portfolio))
+_queue_review(_staged_this_batch)
+
+# -- Portfolio view filters ---------------------------------------------
+_known_classes = sorted({r.asset_class.value for r in st.session_state.unified_records})
+if _known_classes:
+    st.sidebar.header("Portfolio view")
+    chosen_classes = st.sidebar.multiselect(
+        "Asset classes shown in the Portfolio tab",
+        _known_classes,
+        default=st.session_state.portfolio_asset_filter or _known_classes,
+        help="Unchecking a class removes it from the Portfolio tab's totals and sub-tabs, not just visually.",
+    )
+    st.session_state.portfolio_asset_filter = chosen_classes
+
 # -- INDmoney live connect — nested/secondary, not a top-level section ------
 tokens = st.session_state.indmoney_tokens
 if tokens is not None:
@@ -217,6 +278,7 @@ if tokens is not None:
                 with st.spinner("Fetching latest portfolio…"):
                     live_data = fetch_live_snapshot(tokens.access_token)
                     st.session_state.portfolio = parse_indmoney_data(live_data)
+                _queue_review(from_indmoney(st.session_state.portfolio))
                 st.session_state.portfolio_error = None
             except MCPError as exc:
                 st.session_state.portfolio_error = f"Live refresh failed: {exc}"
@@ -347,8 +409,11 @@ if df.empty and sheet is None and portfolio is None:
     )
     st.stop()
 
-tab_dash, tab_networth, tab_invest, tab_budget, tab_data, tab_chat, tab_debug = st.tabs(
-    ["📊 Dashboard", "🏠 Net Worth", "📈 Investments & SIPs", "🎯 Budget vs Actual", "📄 Raw Data", "💬 Ask AI", "🔍 Parsing Details"]
+tab_dash, tab_networth, tab_portfolio, tab_invest, tab_budget, tab_data, tab_chat, tab_debug = st.tabs(
+    [
+        "📊 Dashboard", "🏠 Net Worth", "🧭 Portfolio", "📈 Investments & SIPs",
+        "🎯 Budget vs Actual", "📄 Raw Data", "💬 Ask AI", "🔍 Parsing Details",
+    ]
 )
 
 # ---- Dashboard (bank statements) -------------------------------------------
@@ -456,6 +521,119 @@ with tab_networth:
             st.subheader("Cash — latest balance per bank account")
             latest = df.sort_values("date").groupby("account").tail(1)[["bank", "account", "balance", "date"]]
             st.dataframe(latest, use_container_width=True, hide_index=True)
+
+# ---- Portfolio (unified, cross-source) ---------------------------------
+with tab_portfolio:
+    pending = st.session_state.pending_deltas
+
+    if pending:
+        st.subheader(f"Review {len(pending)} change(s) before they're added to your portfolio")
+        st.caption(
+            "Nothing below is applied until you accept it — re-uploading a file diffs against "
+            "what's already here instead of replacing it. This queue is session-only, same as "
+            "everything else in this app: closing the tab clears it, same as an unreviewed upload."
+        )
+
+        accepted_flags: dict[int, bool] = {}
+        grouped: dict[str, list] = {}
+        for i, d in enumerate(pending):
+            grouped.setdefault(d.status, []).append((i, d))
+
+        _STATUS_LABELS = {
+            NEW: ("New records", True),
+            CHANGED: ("Changed values", True),
+            POSSIBLY_STALE: ("Missing from this upload", False),  # default unchecked — don't remove by default
+        }
+        for status, (label, default_checked) in _STATUS_LABELS.items():
+            rows = grouped.get(status, [])
+            if not rows:
+                continue
+            st.markdown(f"**{label}** ({len(rows)})")
+            hdr = st.columns([3, 2, 2, 2, 1])
+            hdr[0].caption("Record")
+            hdr[1].caption("Field")
+            hdr[2].caption("Old value")
+            hdr[3].caption("New value")
+            hdr[4].caption("Accept")
+            for i, d in rows:
+                cols = st.columns([3, 2, 2, 2, 1])
+                cols[0].write(f"{d.name}  ·  _{d.asset_class.replace('_', ' ')}_")
+                cols[1].write("" if d.field == "*" else d.field.replace("_", " "))
+                cols[2].write("—" if d.old_value is None else str(d.old_value))
+                cols[3].write(str(d.new_value))
+                accepted_flags[i] = cols[4].checkbox(
+                    "Accept", value=default_checked, key=f"delta_accept_{i}", label_visibility="collapsed"
+                )
+            st.divider()
+
+        c1, c2 = st.columns(2)
+        if c1.button("Apply accepted changes", type="primary"):
+            accepted = [d for i, d in enumerate(pending) if accepted_flags.get(i)]
+            st.session_state.unified_records = apply_deltas(
+                accepted, st.session_state.pending_staged, st.session_state.unified_records
+            )
+            st.session_state.pending_deltas = []
+            st.session_state.pending_staged = {}
+            st.rerun()
+        if c2.button("Reject all"):
+            st.session_state.pending_deltas = []
+            st.session_state.pending_staged = {}
+            st.rerun()
+
+    canonical = st.session_state.unified_records
+    if not canonical and not pending:
+        st.info(
+            "Upload any source (sidebar) to build a cross-asset view — this combines bank "
+            "accounts, your personal sheet, and INDmoney into one place, unlike the "
+            "source-specific tabs elsewhere in this app."
+        )
+    elif canonical:
+        st.divider()
+        enabled = set(st.session_state.portfolio_asset_filter or [r.asset_class.value for r in canonical])
+        visible = [r for r in canonical if r.asset_class.value in enabled]
+        present_classes = sorted({r.asset_class.value for r in visible})
+
+        total_assets = sum(r.current_value for r in visible if r.asset_class.value != "liability")
+        total_liabilities = sum(r.current_value for r in visible if r.asset_class.value == "liability")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Assets (visible classes)", f"₹{total_assets:,.0f}")
+        c2.metric("Liabilities (visible classes)", f"₹{total_liabilities:,.0f}")
+        c3.metric("Net", f"₹{total_assets - total_liabilities:,.0f}")
+        st.caption(
+            "Uncheck asset classes in the sidebar's \"Portfolio view\" filter to focus this tab. "
+            "Records aren't automatically merged across sources (e.g. a fund tracked in both "
+            "your personal sheet and INDmoney appears twice, by design — see the Net Worth tab "
+            "for why) unless you've explicitly linked them as the same holding."
+        )
+
+        def _records_frame(records: list) -> pd.DataFrame:
+            return pd.DataFrame(
+                [
+                    {
+                        "Name": r.name,
+                        "Asset Class": r.asset_class.value.replace("_", " ").title(),
+                        "Source": r.source_system.value.replace("_", " ").title(),
+                        "Account": r.account_name,
+                        "Value": r.current_value,
+                    }
+                    for r in records
+                ]
+            )
+
+        subtab_labels = ["All"] + [c.replace("_", " ").title() for c in present_classes]
+        subtabs = st.tabs(subtab_labels)
+        with subtabs[0]:
+            st.dataframe(
+                _records_frame(visible).sort_values("Value", ascending=False),
+                use_container_width=True, hide_index=True,
+            )
+        for idx, cls in enumerate(present_classes, start=1):
+            with subtabs[idx]:
+                rows = [r for r in visible if r.asset_class.value == cls]
+                st.dataframe(
+                    _records_frame(rows).sort_values("Value", ascending=False),
+                    use_container_width=True, hide_index=True,
+                )
 
 # ---- Investments & SIPs -----------------------------------------------
 with tab_invest:
